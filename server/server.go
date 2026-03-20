@@ -63,8 +63,6 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handlePut(w http.ResponseWriter, r *http.Request, key string) {
-	_, existed := a.store.Get(key)
-
 	value, err := readBodyWithLimit(r.Body, a.maxBodyBytes)
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
@@ -75,7 +73,7 @@ func (a *API) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	err = a.store.Put(key, value)
+	created, err := a.store.Put(key, value)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrEmptyKey):
@@ -88,11 +86,11 @@ func (a *API) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	if existed {
-		w.WriteHeader(http.StatusOK)
+	if created {
+		w.WriteHeader(http.StatusCreated)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
+	w.WriteHeader(http.StatusOK)
 }
 
 func (a *API) handleGet(w http.ResponseWriter, key string) {
@@ -108,7 +106,16 @@ func (a *API) handleGet(w http.ResponseWriter, key string) {
 }
 
 func (a *API) handleDelete(w http.ResponseWriter, key string) {
-	deleted := a.store.Delete(key)
+	deleted, err := a.store.Delete(key)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrEmptyKey):
+			writeJSONError(w, http.StatusBadRequest, "invalid key")
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "internal server error")
+		}
+		return
+	}
 	if !deleted {
 		writeJSONError(w, http.StatusNotFound, "key not found")
 		return

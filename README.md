@@ -1,6 +1,6 @@
-# In-Memory Key-Value Store (Go)
+# Durable Key-Value Store (Go)
 
-Simple HTTP key-value service with a concurrency-safe in-memory store.
+Simple HTTP key-value service with a concurrency-safe in-memory map backed by a write-ahead log (WAL).
 
 ## Features
 
@@ -9,7 +9,15 @@ Simple HTTP key-value service with a concurrency-safe in-memory store.
 - `DELETE /kv/{key}` removes a key.
 - `GET /health` returns a health payload.
 - Thread-safe map store using `sync.RWMutex`.
-- Unit tests + HTTP integration tests + concurrency sanity tests.
+- WAL durability with replay on startup.
+- Unit tests, HTTP integration tests, recovery tests, and race checks.
+
+## Durability Contract
+
+- On `PUT` and `DELETE`, the server appends the mutation to the WAL before mutating the in-memory map.
+- If WAL append fails, the operation fails and the in-memory state is left unchanged.
+- With `WAL_SYNC_MODE=always`, acknowledged writes survive process or machine crashes once the response has been returned.
+- With `WAL_SYNC_MODE=never`, recently acknowledged writes may be lost after a crash, but state is still rebuilt from the valid WAL prefix on restart.
 
 ## API Contract
 
@@ -22,6 +30,7 @@ Simple HTTP key-value service with a concurrency-safe in-memory store.
 2. `200 OK` when key existed and was overwritten.
 3. `400 Bad Request` for invalid key/body.
 4. `413 Payload Too Large` when body exceeds configured limit.
+5. `500 Internal Server Error` if the WAL append fails.
 
 ### `GET /kv/{key}`
 
@@ -37,6 +46,7 @@ Simple HTTP key-value service with a concurrency-safe in-memory store.
 - Status codes:
 1. `204 No Content` if deleted.
 2. `404 Not Found` if key is missing.
+3. `500 Internal Server Error` if the WAL append fails.
 
 ### `GET /health`
 
@@ -51,9 +61,11 @@ Simple HTTP key-value service with a concurrency-safe in-memory store.
 - `PUT` overwrites previous value for the same key.
 - `GET` always returns the latest written value.
 - `DELETE` removes the key entirely.
+- On startup, the server replays the WAL from the beginning to rebuild the in-memory state.
+- If replay encounters a truncated final record or a CRC mismatch at the tail, recovery stops at the last valid record.
 - Idempotency:
-1. Repeating `PUT` with same key/value keeps final state unchanged.
-2. Repeating `DELETE` is safe and predictable (`204` then `404` for subsequent missing key).
+1. Repeating `PUT` with the same key/value keeps final state unchanged.
+2. Repeating `DELETE` is safe and predictable (`204` then `404` once the key is already gone).
 
 ## Validation Rules
 
@@ -74,6 +86,7 @@ Examples:
 - `{"error":"invalid body"}`
 - `{"error":"key not found"}`
 - `{"error":"request body too large"}`
+- `{"error":"internal server error"}`
 
 ## Project Structure
 
@@ -88,9 +101,11 @@ Examples:
     └── store_test.go
 ```
 
+Current store files also include `store/wal.go` and `store/wal_codec.go`.
+
 ## Requirements
 
-- Go 1.22+ (tested in this workspace with Go 1.25 toolchain).
+- Go 1.22+.
 
 ## How To Run
 
@@ -100,14 +115,25 @@ From the project root:
 go run .
 ```
 
-Server starts on port `8080` by default.
+Defaults:
 
-Set a custom port:
+- `PORT=8080`
+- `WAL_PATH=data/kv.wal`
+- `WAL_SYNC_MODE=always`
+
+Custom example:
 
 ```powershell
 $env:PORT="9090"
+$env:WAL_PATH="data/kv.wal"
+$env:WAL_SYNC_MODE="always"
 go run .
 ```
+
+Supported `WAL_SYNC_MODE` values:
+
+- `always`
+- `never`
 
 ## How To Test
 
@@ -117,7 +143,7 @@ Run all tests:
 go test ./...
 ```
 
-Run race detector (recommended):
+Run race detector:
 
 ```powershell
 go test -race ./...
@@ -142,3 +168,10 @@ Delete:
 ```powershell
 curl -X DELETE "http://localhost:8080/kv/name" -i
 ```
+
+Persistence check:
+
+1. `curl -X PUT "http://localhost:8080/kv/name" --data-binary "alice" -i`
+2. Stop the server.
+3. Start the server again with the same `WAL_PATH`.
+4. `curl "http://localhost:8080/kv/name" -i`
