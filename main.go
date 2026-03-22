@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -29,10 +32,26 @@ func main() {
 		syncMode = store.SyncAlways
 	}
 
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir == "" {
+		dataDir = filepath.Dir(walPath)
+	}
+
+	memTableFlushThreshold := store.DefaultMemTableFlushThreshold
+	if raw := os.Getenv("MEMTABLE_FLUSH_BYTES"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			log.Fatalf("invalid MEMTABLE_FLUSH_BYTES: %q", raw)
+		}
+		memTableFlushThreshold = parsed
+	}
+
 	kv, err := store.NewStore(store.Config{
-		MaxValueSize: store.DefaultMaxValueSize,
-		WALPath:      walPath,
-		SyncMode:     syncMode,
+		MaxValueSize:           store.DefaultMaxValueSize,
+		WALPath:                walPath,
+		SyncMode:               syncMode,
+		DataDir:                dataDir,
+		MemTableFlushThreshold: memTableFlushThreshold,
 	})
 	if err != nil {
 		log.Fatalf("store initialization failed: %v", err)
@@ -66,7 +85,11 @@ func main() {
 		}
 	}()
 
-	log.Printf("kv server listening on %s (wal=%s sync=%s)", addr, walPath, syncMode)
+	log.Printf(
+		"kv server listening on %s (%s)",
+		addr,
+		fmt.Sprintf("wal=%s sync=%s data_dir=%s flush_bytes=%d", walPath, syncMode, dataDir, memTableFlushThreshold),
+	)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server failed: %v", err)
 	}

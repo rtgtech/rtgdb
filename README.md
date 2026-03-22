@@ -1,6 +1,6 @@
-# Durable Key-Value Store (Go)
+# Durable LSM-Style Key-Value Store (Go)
 
-Simple HTTP key-value service with a concurrency-safe in-memory map backed by a write-ahead log (WAL).
+Simple HTTP key-value service with a concurrency-safe MemTable, a write-ahead log (WAL), and immutable SSTables on disk.
 
 ## Features
 
@@ -10,7 +10,10 @@ Simple HTTP key-value service with a concurrency-safe in-memory map backed by a 
 - `GET /health` returns a health payload.
 - Thread-safe map store using `sync.RWMutex`.
 - WAL durability with replay on startup.
-- Unit tests, HTTP integration tests, recovery tests, and race checks.
+- SSTable flush when the MemTable reaches a size threshold.
+- Full in-memory SSTable index plus min/max key metadata.
+- Tombstones for deletes.
+- Unit tests, HTTP integration tests, flush tests, recovery tests, and race checks.
 
 ## Durability Contract
 
@@ -18,6 +21,14 @@ Simple HTTP key-value service with a concurrency-safe in-memory map backed by a 
 - If WAL append fails, the operation fails and the in-memory state is left unchanged.
 - With `WAL_SYNC_MODE=always`, acknowledged writes survive process or machine crashes once the response has been returned.
 - With `WAL_SYNC_MODE=never`, recently acknowledged writes may be lost after a crash, but state is still rebuilt from the valid WAL prefix on restart.
+
+## LSM Storage Model
+
+- New writes land in the active MemTable and WAL first.
+- When the MemTable reaches the configured threshold, it is sorted and flushed to a new immutable SSTable file.
+- Reads check the active MemTable first, then SSTables from newest to oldest.
+- Deletes are represented as tombstones, not immediate physical removal.
+- A tombstone in the MemTable or a newer SSTable hides older values in older SSTables.
 
 ## API Contract
 
@@ -60,9 +71,10 @@ Simple HTTP key-value service with a concurrency-safe in-memory map backed by a 
 - Keys are unique.
 - `PUT` overwrites previous value for the same key.
 - `GET` always returns the latest written value.
-- `DELETE` removes the key entirely.
-- On startup, the server replays the WAL from the beginning to rebuild the in-memory state.
+- `DELETE` writes a tombstone that makes the key logically absent.
+- On startup, the server loads SSTables from disk and then replays the WAL into the active MemTable.
 - If replay encounters a truncated final record or a CRC mismatch at the tail, recovery stops at the last valid record.
+- Reads check the MemTable first, then SSTables newest-first, so the latest version always wins.
 - Idempotency:
 1. Repeating `PUT` with the same key/value keeps final state unchanged.
 2. Repeating `DELETE` is safe and predictable (`204` then `404` once the key is already gone).
@@ -102,6 +114,7 @@ Examples:
 ```
 
 Current store files also include `store/wal.go` and `store/wal_codec.go`.
+Phase 3 also adds `store/sstable.go` for SSTable writing, loading, indexing, and point lookups.
 
 ## Requirements
 
@@ -119,14 +132,18 @@ Defaults:
 
 - `PORT=8080`
 - `WAL_PATH=data/kv.wal`
+- `DATA_DIR=data`
 - `WAL_SYNC_MODE=always`
+- `MEMTABLE_FLUSH_BYTES=4194304`
 
 Custom example:
 
 ```powershell
 $env:PORT="9090"
 $env:WAL_PATH="data/kv.wal"
+$env:DATA_DIR="data"
 $env:WAL_SYNC_MODE="always"
+$env:MEMTABLE_FLUSH_BYTES="4194304"
 go run .
 ```
 
@@ -175,3 +192,12 @@ Persistence check:
 2. Stop the server.
 3. Start the server again with the same `WAL_PATH`.
 4. `curl "http://localhost:8080/kv/name" -i`
+
+Phase 3 flush demo:
+
+1. Start the server with a small flush threshold, for example `MEMTABLE_FLUSH_BYTES=32`.
+2. Write several keys with `PUT /kv/{key}`.
+3. Check the data directory and observe `sst_*.dat` files appearing.
+4. Delete one of the flushed keys.
+5. Write more keys until another flush happens.
+6. `GET` on the deleted key should still return `404` because the newer tombstone masks the stale value in the older SSTable.

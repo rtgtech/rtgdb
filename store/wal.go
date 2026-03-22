@@ -110,3 +110,22 @@ func (w *WAL) Close() error {
 	w.file = nil
 	return err
 }
+
+func (w *WAL) Reset() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.file == nil {
+		return nil
+	}
+	if err := w.file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if w.syncMode == SyncAlways {
+		return w.file.Sync()
+	}
+	return nil
+}
